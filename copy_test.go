@@ -125,6 +125,30 @@ func TestStructToStructPartialProtoSuccess(t *testing.T) {
 	assert.Equal(t, testUserPartial.Name, userDst.Name)
 }
 
+func TestStructToStructPartialProtoSuccessKeepingDstField(t *testing.T) {
+	type Pool struct {
+		Cpu    int
+		Memory int
+	}
+
+	type Asset struct {
+		Name    string
+		Count   int
+		Require *Pool
+	}
+
+	assetDst := &Asset{Name: "my", Count: 1, Require: &Pool{Cpu: 1, Memory: 100}}
+	assetPartial := &Asset{Name: "my1", Require: &Pool{Cpu: 2, Memory: 200}}
+	mask := fieldmask_utils.MaskFromString(
+		"Require{Cpu},Count")
+	err := fieldmask_utils.StructToStruct(mask, assetPartial, assetDst)
+	assert.Nil(t, err)
+	assert.Equal(t, "my", assetDst.Name)
+	assert.Equal(t, 0, assetDst.Count)
+	assert.Equal(t, 2, assetDst.Require.Cpu)
+	assert.Equal(t, 100, assetDst.Require.Memory)
+}
+
 func TestStructToStructMaskInverse(t *testing.T) {
 	userSrc := &testproto.User{
 		Id:          1,

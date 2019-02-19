@@ -58,6 +58,11 @@ func StructToStruct(filter FieldFilter, src, dst interface{}) error {
 				continue
 			}
 			v := reflect.New(dstFieldType.Elem())
+
+			if !dstField.IsNil() {
+				v.Elem().Set(dstField.Elem())
+			}
+
 			if err := StructToStruct(subFilter, srcField.Interface(), v.Interface()); err != nil {
 				return err
 			}

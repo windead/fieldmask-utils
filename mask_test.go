@@ -1,11 +1,14 @@
 package fieldmask_utils_test
 
 import (
-	"github.com/golang/protobuf/protoc-gen-go/generator"
-	"github.com/mennanov/fieldmask-utils"
-	"github.com/stretchr/testify/assert"
-	"google.golang.org/genproto/protobuf/field_mask"
 	"testing"
+
+	"github.com/golang/protobuf/protoc-gen-go/generator"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/protobuf/field_mask"
+
+	"github.com/mennanov/fieldmask-utils"
 )
 
 func TestMask_String(t *testing.T) {
@@ -13,7 +16,13 @@ func TestMask_String(t *testing.T) {
 	assert.Equal(t, "a{b{c}}", mask.String())
 }
 
-func TestMaskFromProtoFieldMaskSuccess(t *testing.T) {
+func TestMaskInverse_String(t *testing.T) {
+	mask := fieldmask_utils.MaskInverseFromString("a{b{c}}")
+	assert.Equal(t, "a{b{c}}", mask.String())
+}
+
+func TestFieldFilterFromPaths_Success(t *testing.T) {
+	eye := func(s string) string { return s }
 	testCases := []struct {
 		mask         *field_mask.FieldMask
 		expectedTree string
@@ -40,9 +49,20 @@ func TestMaskFromProtoFieldMaskSuccess(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		mask, err := fieldmask_utils.MaskFromProtoFieldMask(testCase.mask, func(s string) string { return s })
-		assert.Nil(t, err)
-		assert.Equal(t, fieldmask_utils.MaskFromString(testCase.expectedTree), mask)
+		maskFromProto, err := fieldmask_utils.MaskFromProtoFieldMask(testCase.mask, eye)
+		require.NoError(t, err)
+		maskFromPaths, err := fieldmask_utils.MaskFromPaths(testCase.mask.Paths, eye)
+		require.NoError(t, err)
+		assert.Equal(t, fieldmask_utils.MaskFromString(testCase.expectedTree), maskFromProto)
+		assert.Equal(t, maskFromProto, maskFromPaths)
+		// MaskInverse
+		maskInverseFromProto, err := fieldmask_utils.MaskInverseFromProtoFieldMask(testCase.mask, eye)
+		require.NoError(t, err)
+		maskInverseFromPaths, err := fieldmask_utils.MaskInverseFromPaths(testCase.mask.Paths, eye)
+		require.NoError(t, err)
+		fs := fieldmask_utils.MaskInverseFromString(testCase.expectedTree)
+		assert.Equal(t, fs, maskInverseFromProto)
+		assert.Equal(t, maskInverseFromProto, maskInverseFromPaths)
 	}
 }
 
@@ -81,7 +101,7 @@ func TestMaskFromString(t *testing.T) {
 				},
 			}, 2,
 		},
-		{"foo, bar{c {d,e{f,\ng,h}}},t", fieldmask_utils.Mask{
+		{"foo, bar{c {d,e{f,\ng,h}}},\tt", fieldmask_utils.Mask{
 			"foo": fieldmask_utils.Mask{},
 			"bar": fieldmask_utils.Mask{
 				"c": fieldmask_utils.Mask{

@@ -2,19 +2,43 @@ package fieldmask_utils
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/pkg/errors"
 	"google.golang.org/genproto/protobuf/field_mask"
-	"strings"
 )
 
 // FieldFilter is an interface used by the copying function to filter fields that are needed to be copied.
 type FieldFilter interface {
-	// Filter should return a corresponding FieldFilter for the given fieldName and
+	// Filter should return a corresponding FieldFilter for the given fieldName and a boolean result. If result is true
+	// then the field is copied, skipped otherwise.
 	Filter(fieldName string) (FieldFilter, bool)
+	// Returns true if the FieldFilter is empty. In this case all fields are copied.
+	IsEmpty() bool
+}
+
+// FieldFilterContainer is a FieldFilter with additional methods Get and Set.
+type FieldFilterContainer interface {
+	FieldFilter
+	// Get gets the FieldFilter for the given field name. Result is false if the filter is not found.
+	Get(fieldName string) (filter FieldFilterContainer, result bool)
+	// Set sets the FieldFilter for the given field name.
+	Set(fieldName string, filter FieldFilterContainer)
 }
 
 // Mask is a tree-based implementation of a FieldFilter.
-type Mask map[string]FieldFilter
+type Mask map[string]FieldFilterContainer
+
+// Get gets the FieldFilter for the given field name. Result is false if the filter is not found.
+func (m Mask) Get(fieldName string) (FieldFilterContainer, bool) {
+	f, ok := m[fieldName]
+	return f, ok
+}
+
+// Set sets the FieldFilter for the given field name.
+func (m Mask) Set(fieldName string, filter FieldFilterContainer) {
+	m[fieldName] = filter
+}
 
 // Compile time interface check.
 var _ FieldFilter = Mask{}
@@ -33,7 +57,12 @@ func (m Mask) Filter(fieldName string) (FieldFilter, bool) {
 	return subFilter, ok
 }
 
-func mapToString(m map[string]FieldFilter) string {
+// IsEmpty returns true of the mask is empty.
+func (m Mask) IsEmpty() bool {
+	return len(m) == 0
+}
+
+func mapToString(m map[string]FieldFilterContainer) string {
 	if len(m) == 0 {
 		return ""
 	}
@@ -59,7 +88,18 @@ func (m Mask) String() string {
 }
 
 // MaskInverse is an inversed version of a Mask (will copy all the fields except those mentioned in the mask).
-type MaskInverse Mask
+type MaskInverse map[string]FieldFilterContainer
+
+// Get gets the FieldFilter for the given field name. Result is false if the filter is not found.
+func (m MaskInverse) Get(fieldName string) (FieldFilterContainer, bool) {
+	f, ok := m[fieldName]
+	return f, ok
+}
+
+// Set sets the FieldFilter for the given field name.
+func (m MaskInverse) Set(fieldName string, filter FieldFilterContainer) {
+	m[fieldName] = filter
+}
 
 // Filter returns true for those fieldNames that do NOT exist in the underlying map.
 // Field names that start with "XXX_" are ignored as unexported.
@@ -68,7 +108,15 @@ func (m MaskInverse) Filter(fieldName string) (FieldFilter, bool) {
 	if !ok {
 		return MaskInverse{}, !strings.HasPrefix(fieldName, "XXX_")
 	}
-	return subFilter, subFilter != nil
+	if subFilter == nil {
+		return nil, false
+	}
+	return subFilter, !subFilter.IsEmpty()
+}
+
+// IsEmpty returns true if the mask is empty.
+func (m MaskInverse) IsEmpty() bool {
+	return len(m) == 0
 }
 
 func (m MaskInverse) String() string {
@@ -77,80 +125,117 @@ func (m MaskInverse) String() string {
 
 // MaskFromProtoFieldMask creates a Mask from the given FieldMask.
 func MaskFromProtoFieldMask(fm *field_mask.FieldMask, naming func(string) string) (Mask, error) {
-	root := make(Mask)
-	for _, path := range fm.GetPaths() {
+	return MaskFromPaths(fm.GetPaths(), naming)
+}
+
+// MaskInverseFromProtoFieldMask creates a MaskInverse from the given FieldMask.
+func MaskInverseFromProtoFieldMask(fm *field_mask.FieldMask, naming func(string) string) (MaskInverse, error) {
+	return MaskInverseFromPaths(fm.GetPaths(), naming)
+}
+
+// MaskFromPaths creates a new Mask from the given paths.
+func MaskFromPaths(paths []string, naming func(string) string) (Mask, error) {
+	mask, err := FieldFilterFromPaths(paths, naming, func() FieldFilterContainer {
+		return make(Mask)
+	})
+	if mask != nil {
+		return mask.(Mask), err
+	}
+	return nil, err
+}
+
+// MaskInverseFromPaths creates a new MaskInverse from the given paths.
+func MaskInverseFromPaths(paths []string, naming func(string) string) (MaskInverse, error) {
+	mask, err := FieldFilterFromPaths(paths, naming, func() FieldFilterContainer {
+		return make(MaskInverse)
+	})
+	if mask != nil {
+		return mask.(MaskInverse), err
+	}
+	return nil, err
+}
+
+// FieldFilterFromPaths creates a new FieldFilter from the given paths.
+func FieldFilterFromPaths(paths []string, naming func(string) string, filter func() FieldFilterContainer) (FieldFilterContainer, error) {
+	root := filter()
+	for _, path := range paths {
 		mask := root
 		for _, fieldName := range strings.Split(path, ".") {
 			if fieldName == "" {
 				return nil, errors.Errorf("invalid fieldName FieldFilter format: \"%s\"", path)
 			}
 			newFieldName := naming(fieldName)
-			subNode, ok := mask[newFieldName]
+			subNode, ok := mask.Get(newFieldName)
 			if !ok {
-				mask[newFieldName] = make(Mask)
-				subNode = mask[newFieldName]
+				mask.Set(newFieldName, filter())
+				subNode, _ = mask.Get(newFieldName)
 			}
-			mask = subNode.(Mask)
+			mask = subNode
 		}
 	}
 	return root, nil
 }
 
-// MaskFromString creates a `Mask` from a string `s`.
-// `s` is supposed to be a valid string representation of a FieldFilter like "a,b,c{d,e{f,g}},d".
-// This is the same string format as in FieldFilter.String(). This function should only be used in tests as it does not
-// validate the given string and is only convenient to easily create DefaultMasks.
+// MaskFromString creates a new Mask instance from a given string.
+// Use in tests only. See FieldFilterFromString for details.
 func MaskFromString(s string) Mask {
-	mask, _ := maskFromRunes([]rune(s))
-	return mask
+	return FieldFilterFromString(s, func() FieldFilterContainer {
+		return make(Mask)
+	}).(Mask)
 }
 
-func maskFromRunes(runes []rune) (Mask, int) {
-	mask := make(Mask)
+// MaskInverseFromString creates a new MaskInverse instance from a given string.
+// Use in tests only. See FieldFilterFromString for details.
+func MaskInverseFromString(s string) MaskInverse {
+	return FieldFilterFromString(s, func() FieldFilterContainer {
+		return make(MaskInverse)
+	}).(MaskInverse)
+}
+
+// FieldFilterFromString creates a new FieldFilterContainer from string.
+// Input string is supposed to be a valid string representation of a FieldFilter like "a,b,c{d,e{f,g}},d".
+// Use it in tests only as the input string is not validated and the underlying function panics in case of a
+// parse error.
+func FieldFilterFromString(input string, filter func() FieldFilterContainer) FieldFilterContainer {
 	var fieldName []string
-	runes = append(runes, []rune(",")...)
-	pos := 0
-	for pos < len(runes) {
-		char := fmt.Sprintf("%c", runes[pos])
+	mask := filter()
+	masks := []FieldFilterContainer{mask}
+	for pos, r := range input {
+		char := string(r)
 		switch char {
 		case " ", "\n", "\t":
-			// Ignore white spaces.
+		// Skip white spaces.
 
-		case ",", "{", "}":
+		case ",":
+			if len(fieldName) != 0 {
+				mask.Set(strings.Join(fieldName, ""), filter())
+				fieldName = nil
+			}
+
+		case "{":
 			if len(fieldName) == 0 {
-				switch char {
-				case "}":
-					return mask, pos
-				case ",":
-					pos += 1
-					continue
-				default:
-					panic("invalid mask string format")
-				}
+				panic(fmt.Sprintf("invalid mask format at position %d: got '{', expected a character", pos))
 			}
+			subMask := filter()
+			mask.Set(strings.Join(fieldName, ""), subMask)
+			fieldName = nil
+			masks = append(masks, mask)
+			mask = subMask
 
-			var subMask FieldFilter
-			if char == "{" {
-				var jump int
-				// Parse nested tree.
-				subMask, jump = maskFromRunes(runes[pos+1:])
-				pos += jump + 1
-			} else {
-				subMask = make(Mask)
+		case "}":
+			if len(fieldName) != 0 {
+				mask.Set(strings.Join(fieldName, ""), filter())
+				fieldName = nil
 			}
-			f := strings.Join(fieldName, "")
-			mask[f] = subMask
-			// Reset FieldName.
-			fieldName = []string{}
-
-			if char == "}" {
-				return mask, pos
-			}
+			mask = masks[len(masks)-1]
+			masks = masks[:len(masks)-1]
 
 		default:
 			fieldName = append(fieldName, char)
 		}
-		pos += 1
 	}
-	return mask, pos
+	if len(fieldName) != 0 {
+		mask.Set(strings.Join(fieldName, ""), filter())
+	}
+	return mask
 }

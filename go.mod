@@ -1,4 +1,4 @@
-module github.com/mennanov/fieldmask-utils
+module github.com/windead/fieldmask-utils
 
 go 1.15
 
